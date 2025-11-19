@@ -144,14 +144,11 @@ class CameraSource(VideoSource, Loggable):
         plane_detector: PlaneDetector,
         ocr: OCR,
         target_fps: int,
-        preprocessing_func: PreprocessorFn | None = None,
+        preprocessing_func: PreprocessorFn = preprocess_identity,
         start_frame: int = 0,
         pause_on_detection: bool = True,
     ) -> None:
         skip = max(int(self.fps // target_fps), 1)
-        preprocessing_func = (
-            preprocessing_func if preprocessing_func else preprocess_identity
-        )
         n_frames = len(self.frames)
 
         for idx, _ in enumerate(self.frames[start_frame:], start_frame):
@@ -304,12 +301,15 @@ class CameraSource(VideoSource, Loggable):
 
     def __repr__(self) -> str:
         res = f"{self.__class__.__name__}(\n"
-        res += f"\t'file_path': {self.file_path}\n"
-        res += f"\t'fps': {self.fps}\n"
+        res += f"\t'file_path': {self.file_path}, \n"
+        res += f"\t'fps': {self.fps}, \n"
         res += f"\t'frames': {len(self.frames)}\n"
         res += ")"
 
         return res
+
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")
 
 
 class VideoFileSource(VideoSource, Loggable):
@@ -368,13 +368,21 @@ class VideoFileSource(VideoSource, Loggable):
         return self
 
     def __repr__(self) -> str:
+        segment_time_range_str = "<none>"
+        if self.segment_time_range is not None:
+            start, end = self.segment_time_range[0], self.segment_time_range[1]
+            segment_time_range_str = f"00:{start:02d}-00:{end:02d}"
+
         res = f"{self.__class__.__name__}(\n"
-        res += f"\t'file_path': {self.file_path}\n"
-        res += f"\t'fps': {self.fps}\n"
-        res += f"\t'target_fps': {self.target_fps}\n"
-        res += f"\t'segment_time_range': {self.segment_time_range}\n"
-        for key, frames in self.frames_dict.items():
-            res += f"\t'{key}': {len(frames)}\n"
+        res += f"\t'file_path': {self.file_path}, \n"
+        res += f"\t'fps': {self.fps}, \n"
+        res += f"\t'target_fps': {self.target_fps}, \n"
+        res += f"\t'segment_time_range': {segment_time_range_str}, \n"
+        for i, (key, frames) in enumerate(self.frames_dict.items()):
+            res += f"\t'{key}': {len(frames)}{', ' if i < len(self.frames_dict) - 1 else ''}\n"
         res += ")"
 
         return res
+
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")

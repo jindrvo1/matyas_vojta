@@ -2,17 +2,6 @@ import cv2
 import numpy as np
 
 from lib.frame import Frame
-from lib.ocr import OCREngine
-from lib.utils import PreprocessorFn
-
-
-def get_processing_func(ocr_engine: OCREngine | None = None) -> PreprocessorFn:
-    if ocr_engine is None:
-        return preprocess_identity
-
-    func_map = {"PADDLEOCR": preprocess_paddleocr, "EASYOCR": preprocess_easyocr}
-
-    return func_map[ocr_engine.name]
 
 
 def preprocess_test(frame: Frame) -> Frame:

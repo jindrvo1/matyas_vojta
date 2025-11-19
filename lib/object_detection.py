@@ -61,9 +61,12 @@ class PlaneDetector(Loggable):
 
         return cropped_frame
 
-    def detect(self, frames: list[Frame], confidence_threshold: float) -> list[Frame]:
+    def detect(
+        self, frames: list[Frame], confidence_threshold: float | None = None
+    ) -> list[Frame]:
         self.logger.debug(f"Total frames to process: {len(frames)}.")
 
+        confidence_threshold = confidence_threshold or self.confidence_threshold
         cropped_frames = []
         for frame in frames:
             cropped_frame = self.detect_frame(frame, confidence_threshold)
@@ -89,8 +92,11 @@ class PlaneDetector(Loggable):
 
     def __repr__(self) -> str:
         res = f"{self.__class__.__name__}(\n"
-        res += f"\t'model': {self.model.model_name}\n"
+        res += f"\t'model': {self.model.model_name}, \n"
         res += f"\t'confidence_threshold': {self.confidence_threshold}\n"
         res += ")"
 
         return res
+
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")
