@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from abc import abstractmethod
-from typing import Self
+from typing import Self, Sequence
 
 import cv2
 import matplotlib.pyplot as plt
@@ -139,39 +139,75 @@ class CameraSource(VideoSource, Loggable):
     def get_frames(self, idx_start: int = 0, idx_end: int = -1) -> list[Frame]:
         return self.frames[idx_start:idx_end]
 
+    def _pad_list_with_none(self, lst: Sequence[int | None], length: int) -> list:
+        lst = list(lst)
+        n_nones = length - len(lst)
+        return [*lst, *([None] * n_nones)]
+
+    def _parse_start_end_frame(
+        self,
+        start_end_frame: Sequence[int | None],
+        start_end_time: Sequence[int | None],
+    ) -> tuple[int, int]:
+        end_idx = len(self.frames) - 1
+
+        start_frame_res, end_frame_res = 0, end_idx
+        start_time, end_time = self._pad_list_with_none(start_end_time, 2)
+        start_frame, end_frame = self._pad_list_with_none(start_end_frame, 2)
+
+        start_frame_res = (
+            max(0, int(start_time * self.fps)) if start_time else start_frame_res
+        )
+        end_frame_res = (
+            min(end_idx, int(end_time * self.fps)) if end_time else end_frame_res
+        )
+
+        start_frame_res = max(0, start_frame) if start_frame else start_frame_res
+        end_frame_res = min(end_idx, end_frame) if end_frame else end_frame_res
+
+        return start_frame_res, end_frame_res
+
     def start_stream_notebook(
         self,
         plane_detector: PlaneDetector,
         ocr: OCR,
         target_fps: int,
         preprocessing_func: PreprocessorFn = preprocess_identity,
-        start_frame: int = 0,
+        start_end_frame: Sequence[int | None] = (None, None),
+        start_end_time: Sequence[int | None] = (None, None),
         pause_on_detection: bool = True,
     ) -> None:
+        start_frame, end_frame = self._parse_start_end_frame(
+            start_end_frame, start_end_time
+        )
         skip = max(int(self.fps // target_fps), 1)
         n_frames = len(self.frames)
 
-        for idx, _ in enumerate(self.frames[start_frame:], start_frame):
+        for idx, _ in enumerate(self.frames[start_frame:end_frame], start_frame):
             frame = self.frames[idx]
             self._show_frame(frame, idx, n_frames)
 
             if idx % skip != 0:
                 continue
 
-            cropped = plane_detector.detect_frame(frame)
+            cropped_frames = plane_detector.detect_frame(frame)
 
-            if cropped.empty:
+            if len(cropped_frames) == 0:
                 continue
 
-            preprocessed = preprocessing_func(cropped)
-            ocr_results = ocr.predict_frame(preprocessed)
+            frames_data = []
+            for cropped_frame in cropped_frames:
+                preprocessed = preprocessing_func(cropped_frame)
+                ocr_results = ocr.predict_frame(preprocessed)
+                frames_data.append((cropped_frame, preprocessed, ocr_results))
 
-            self._show_frames_of_interest_boxes(cropped, preprocessed, idx, ocr_results)
+            self._show_frames_of_interest_boxes(frames_data, idx)
             if pause_on_detection:
-                try:
-                    input("Press Enter to continue, Ctrl+C to stop... ")
-                except KeyboardInterrupt:
-                    print("Stopping stream.")
+                if (
+                    input("Press any key to continue, type 'q' to stop... ")
+                    .strip()
+                    .lower()
+                ) == "q":
                     break
 
     def _show_frame(self, frame: Frame, idx: int, n_frames: int):
@@ -187,67 +223,106 @@ class CameraSource(VideoSource, Loggable):
 
     def _show_frames_of_interest_boxes(
         self,
-        cropped: Frame,
-        preprocessed: Frame,
+        frames_data: list[tuple[Frame, Frame, dict[str, list[OCRResult]]]],
         idx: int,
-        ocr_results: dict[str, list[OCRResult]],
     ):
+        if not frames_data:
+            return
+
         clear_output(wait=True)
 
-        cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
-        pre_rgb = cv2.cvtColor(preprocessed.copy(), cv2.COLOR_BGR2RGB)
+        all_texts: list[str] = []
+        for _, _, ocr_results in frames_data:
+            for text in ocr_results.keys():
+                if text not in all_texts:
+                    all_texts.append(text)
 
         label_to_color = {
-            text: BASE_COLORS[i % len(BASE_COLORS)]
-            for i, text in enumerate(ocr_results.keys())
+            text: BASE_COLORS[i % len(BASE_COLORS)] for i, text in enumerate(all_texts)
         }
 
         summary_lines: list[str] = []
         summary_colors: list[tuple[float, ...]] = []
-        for text, results in ocr_results.items():
-            color_rgb_cv2 = tuple(label_to_color[text][0:3])
-            color_rgb_matplotlib = tuple(map(lambda x: x / 255, color_rgb_cv2))
 
-            for r in results:
-                conf, pts = r["conf"], r["points"]
-                summary_lines.append(f"{text}: {conf:.3f}")
-                summary_colors.append(color_rgb_matplotlib)
+        n_planes = len(frames_data)
+        ncols = 2
+        nrows = n_planes
 
-                if len(pts) == 2:
-                    self._draw_boxes_paddle(pre_rgb, pts, text, color_rgb_cv2)
-                elif len(pts) == 4:
-                    self._draw_boxes_easyocr(pre_rgb, pts, text, color_rgb_cv2)
+        # Height grows with number of planes
+        fig_height = 4 * nrows  # tweakable
+        fig, axes = plt.subplots(nrows, ncols, figsize=(16, fig_height))
 
-        extra_bottom = min(0.03 * len(summary_lines), 0.18) if summary_lines else 0.02
+        # If there's only one plane, axes is a 1D array, normalize it to 2D
+        if nrows == 1:
+            axes = np.array([axes])  # shape (1, 2)
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+        for plane_idx, (cropped, preprocessed, ocr_results) in enumerate(frames_data):
+            cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+            pre_rgb = cv2.cvtColor(preprocessed.copy(), cv2.COLOR_BGR2RGB)
 
-        axes[0].imshow(cropped_rgb)
-        axes[0].set_title(f"Frame {idx + 1} – cropped")
-        axes[0].axis("off")
+            ax_cropped = axes[plane_idx, 0]
+            ax_pre = axes[plane_idx, 1]
 
-        axes[1].imshow(pre_rgb)
-        axes[1].set_title("Preprocessed + OCR boxes")
-        axes[1].axis("off")
+            # Show cropped
+            ax_cropped.imshow(cropped_rgb)
+            ax_cropped.set_title(f"Frame {idx + 1} – plane #{plane_idx + 1} (cropped)")
+            ax_cropped.axis("off")
 
+            # Draw OCR boxes on preprocessed
+            for text, results in ocr_results.items():
+                color_rgb_cv2 = tuple(label_to_color[text][0:3])
+                color_rgb_matplotlib = tuple(c / 255 for c in color_rgb_cv2)
+
+                for r in results:
+                    conf, pts = r["conf"], r["points"]
+
+                    # Collect summary lines with plane index, to make it clear
+                    summary_lines.append(
+                        f"Plane #{plane_idx + 1} – {text}: {float(conf):.3f}"
+                    )
+                    summary_colors.append(color_rgb_matplotlib)
+
+                    if len(pts) == 2:
+                        self._draw_boxes_paddle(pre_rgb, pts, text, color_rgb_cv2)
+                    elif len(pts) == 4:
+                        self._draw_boxes_easyocr(pre_rgb, pts, text, color_rgb_cv2)
+
+            ax_pre.imshow(pre_rgb)
+            ax_pre.set_title(
+                f"Frame {idx + 1} – plane #{plane_idx + 1} (preprocessed + OCR boxes)"
+            )
+            ax_pre.axis("off")
+
+        # Dynamic space at bottom for the summary text
+        extra_bottom = min(0.02 * max(len(summary_lines), 1), 0.18)
+        plt.tight_layout(rect=(0, extra_bottom, 1, 1))
+
+        # Draw the text summary under the figure
         if summary_lines:
             y_base = extra_bottom - 0.01
-            line_spacing = 0.028
+            line_spacing = 0.021  # slightly tighter spacing if many lines
+
             for i, (line, color) in enumerate(zip(summary_lines, summary_colors)):
                 fig.text(
-                    0.01, y_base + i * line_spacing, line, color=color, fontsize=11
+                    0.01, y_base + i * line_spacing, line, color=color, fontsize=10
                 )
 
-        plt.tight_layout(rect=(0, extra_bottom, 1, 1))
         display(fig)
         plt.close(fig)
 
-        print(f"Frame {idx + 1}: plane detected.")
-        if ocr_results:
+        # Console logging
+        print(f"Frame {idx + 1}: {n_planes} plane(s) detected.")
+        if any(fd[2] for fd in frames_data):
             print("OCR results:")
-            for text, results in ocr_results.items():
-                for r in results:
-                    print(f"\t{text}: {float(r['conf']):.3f}")
+            for plane_idx, (_cropped, _pre, ocr_results) in enumerate(frames_data):
+                if not ocr_results:
+                    print(f"\tPlane #{plane_idx + 1}: <no OCR results>")
+                    continue
+
+                print(f"\tPlane #{plane_idx + 1}:")
+                for text, results in ocr_results.items():
+                    for r in results:
+                        print(f"\t\t{text}: {float(r['conf']):.3f}")
         else:
             print("OCR results: <none>")
 
