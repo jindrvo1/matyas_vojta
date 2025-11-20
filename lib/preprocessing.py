@@ -3,21 +3,106 @@ import numpy as np
 import easyocr
 
 from lib.frame import Frame
-from lib.ocr import OCREngine
-from lib.utils import PreprocessorFn
-
-
-def get_processing_func(ocr_engine: OCREngine | None = None) -> PreprocessorFn:
-    if ocr_engine is None:
-        return preprocess_identity
-
-    func_map = {"PADDLEOCR": preprocess_paddleocr, "EASYOCR": preprocess_easyocr}
-
-    return func_map[ocr_engine.name]
+from lib.logger import logger
 
 
 def preprocess_test(frame: Frame) -> Frame:
-    # úpravy
+    # ...existing code...
+    return frame
+
+def enhance_contrast(
+    frame: np.ndarray,
+    method: str = "clahe",
+    clahe_clip: float = 3.0,
+    clahe_tile: tuple[int, int] = (8, 8),
+    gamma: float = 1.2,
+) -> np.ndarray:
+    """Robust contrast enhancement. Input can be gray or BGR; returns BGR uint8."""
+    if frame is None:
+        return frame
+
+    # Ensure numpy array and not empty
+    frame = np.asarray(frame)
+    if frame.size == 0:
+        return frame
+
+    # Ensure uint8
+    if frame.dtype != np.uint8:
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+    # If grayscale, convert to BGR for color conversions
+    if frame.ndim == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    elif frame.ndim == 3 and frame.shape[2] == 1:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+    try:
+        if method == "clahe":
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=clahe_tile)
+            l2 = clahe.apply(l)
+            lab2 = cv2.merge((l2, a, b))
+            out = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
+            return out
+        if method == "gamma":
+            inv = 1.0 / max(gamma, 1e-6)
+            table = ((np.linspace(0, 255, 256) / 255.0) ** inv * 255.0).astype("uint8")
+            return cv2.LUT(frame, table)
+        if method == "hist":
+            ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+            y, cr, cb = cv2.split(ycrcb)
+            y_eq = cv2.equalizeHist(y)
+            ycrcb2 = cv2.merge((y_eq, cr, cb))
+            return cv2.cvtColor(ycrcb2, cv2.COLOR_YCrCb2BGR)
+    except Exception as e:
+        logger.debug(f"enhance_contrast failed: {e}")
+    return frame
+
+
+def run_ocr(
+    ocr_reader: easyocr.Reader,
+    frames: list[np.ndarray],
+    enhance: bool = True,
+    method: str = "clahe",
+) -> dict[str, list[float]]:
+    """
+    Apply enhancement robustly per-cropped-frame (handles grayscale/empty),
+    convert to RGB and run easyocr.
+    """
+    detected_registrations = {}
+    if not frames:
+        return detected_registrations
+
+    for i, frame in enumerate(frames):
+        try:
+            if frame is None or np.asarray(frame).size == 0:
+                continue
+
+            proc = frame.copy()
+            if enhance:
+                proc = enhance_contrast(proc, method=method)
+
+            # easyocr expects RGB
+            if proc.ndim == 3 and proc.shape[2] == 3:
+                proc_rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
+            else:
+                # if still single channel, convert to 3-channel RGB-like
+                proc_rgb = proc
+
+            ocr_results = ocr_reader.readtext(
+                proc_rgb, allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- "
+            )
+            for _, text, text_conf in ocr_results:
+                cleaned = text.strip().upper()
+                text_conf = float(text_conf)
+                detected_registrations.setdefault(cleaned, []).append(text_conf)
+        except Exception as e:
+            logger.debug(f"run_ocr: error on frame {i}: {e}")
+            continue
+
+    return detected_registrations
+# ...existing code...
     return frame
 
 
