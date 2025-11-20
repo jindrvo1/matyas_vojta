@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import easyocr
 
 from lib.frame import Frame
 from lib.ocr import OCREngine
@@ -16,8 +17,56 @@ def get_processing_func(ocr_engine: OCREngine | None = None) -> PreprocessorFn:
 
 
 def preprocess_test(frame: Frame) -> Frame:
-    # Upravy
+    # úpravy
     return frame
+
+
+def run_ocr(
+    ocr_reader: easyocr.Reader,
+    frames: list[np.ndarray],
+    enhance: bool = True,
+    method: str = "clahe",
+) -> dict[str, list[float]]:
+    """
+    Apply enhancement robustly per-cropped-frame (handles grayscale/empty),
+    convert to RGB and run easyocr.
+    """
+    detected_registrations = {}
+    if not frames:
+        return detected_registrations
+
+    for i, frame in enumerate(frames):
+        try:
+            if frame is None or np.asarray(frame).size == 0:
+                continue
+
+            proc = frame.copy()
+            if enhance:
+                proc = enhance_contrast(proc, method=method)
+
+            # easyocr expects RGB
+            if proc.ndim == 3 and proc.shape[2] == 3:
+                proc_rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
+            else:
+                # if still single channel, convert to 3-channel RGB-like
+                proc_rgb = proc
+
+            ocr_results = ocr_reader.readtext(
+                proc_rgb, allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- "
+            )
+            for _, text, text_conf in ocr_results:
+                cleaned = text.strip().upper()
+                text_conf = float(text_conf)
+                detected_registrations.setdefault(cleaned, []).append(text_conf)
+        except Exception as e:
+            logger.debug(f"run_ocr: error on frame {i}: {e}")
+            continue
+
+    return detected_registrations
+# ...existing code...
+    return frame
+
+
 
 
 def preprocess_identity(frame: Frame) -> Frame:
