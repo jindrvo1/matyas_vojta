@@ -21,14 +21,14 @@ class PlaneDetector(Loggable):
 
     def detect_frame(
         self, frame: Frame, confidence_threshold: float | None = None
-    ) -> Frame:
+    ) -> list[Frame]:
         confidence_threshold = confidence_threshold or self.confidence_threshold
-        cropped_frame: Frame = Frame()
+        cropped_frames: list[Frame] = []
         result = self.model(frame, verbose=False)[0]
 
         if len(result.boxes) == 0:
             self.logger.debug("❌ Frame does not contain any object.")
-            return cropped_frame
+            return cropped_frames
 
         for box in result.boxes:
             object_type, conf = int(box.cls[0]), float(box.conf[0])
@@ -57,22 +57,34 @@ class PlaneDetector(Loggable):
                 continue
 
             self.logger.debug("✅ Frame contains an airplane.")
-            cropped_frame = crop
-
-        return cropped_frame
-
-    def detect(self, frames: list[Frame], confidence_threshold: float) -> list[Frame]:
-        self.logger.debug(f"Total frames to process: {len(frames)}.")
-
-        cropped_frames = []
-        for frame in frames:
-            cropped_frame = self.detect_frame(frame, confidence_threshold)
-            if not cropped_frame.empty:
-                cropped_frames.append(cropped_frame)
-
-        self.logger.debug(f"Total frames found: {len(cropped_frames)}.")
+            cropped_frames.append(crop)
 
         return cropped_frames
+
+    def detect(
+        self, frames: list[Frame], confidence_threshold: float | None = None
+    ) -> list[Frame]:
+        self.logger.debug(f"Total frames to process: {len(frames)}.")
+
+        confidence_threshold = confidence_threshold or self.confidence_threshold
+        cropped_frames_res, n_cropped_frames, max_simultaneously = [], 0, 0
+        for frame in frames:
+            cropped_frames = self.detect_frame(frame, confidence_threshold)
+            if len(cropped_frames) > 0:
+                # This is a temporary solution that, in cases of multiple airplanes in the frame,
+                # puts all of the returned frames into one list. Hence, OCR will only yield one
+                # result. In the future, this should be changed to return a list of lists
+                # and OCR should be able to handle multiple airplanes.
+                cropped_frames_res += cropped_frames
+
+                n_cropped_frames += len(cropped_frames)
+                max_simultaneously = max(max_simultaneously, len(cropped_frames))
+
+        self.logger.debug(
+            f"Total frames found: {n_cropped_frames} (max {max_simultaneously} simultaneously)."
+        )
+
+        return cropped_frames_res
 
     def _check_that_airplane_is_in_frame(
         self, cropped_frame: Frame, box_aspect_ratio_min: float = 2.0
@@ -89,8 +101,11 @@ class PlaneDetector(Loggable):
 
     def __repr__(self) -> str:
         res = f"{self.__class__.__name__}(\n"
-        res += f"\t'model': {self.model.model_name}\n"
+        res += f"\t'model': {self.model.model_name}, \n"
         res += f"\t'confidence_threshold': {self.confidence_threshold}\n"
         res += ")"
 
         return res
+
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")

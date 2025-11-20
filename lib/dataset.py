@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Any, Optional, overload
 
 import pandas as pd
 
@@ -98,12 +98,13 @@ class Dataset(Loggable):
             def __init__(self, df: pd.DataFrame):
                 self.df = df
 
-            def __getitem__(self, key: int | tuple[int, int]):
-                result = self.df.loc[key]
+            @overload
+            def __getitem__(self, key: int) -> pd.DataFrame: ...
 
-                if not isinstance(result, pd.DataFrame):
-                    return result
+            @overload
+            def __getitem__(self, key: tuple[int, int]) -> pd.Series: ...
 
-                return result.iloc[0] if result.shape[0] == 1 else result
+            def __getitem__(self, key: Any) -> pd.Series | pd.DataFrame:
+                return self.df.loc[key]
 
         return _LocWrapper(self.df)

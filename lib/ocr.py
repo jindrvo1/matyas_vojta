@@ -10,6 +10,7 @@ import easyocr  # type: ignore
 import numpy as np
 import paddleocr  # type: ignore
 
+from lib.frame import Frame
 from lib.logger import Loggable
 from lib.utils import OCRResult, suppress_logging
 
@@ -105,12 +106,23 @@ class OCR(Loggable):
     @forward_to_ocr
     @abstractmethod
     def run_ocr(
-        self, frames: list[np.ndarray], return_all: bool = False
+        self, frames: list[Frame], return_all: bool = False
     ) -> dict[str, float]: ...
 
     @forward_to_ocr
     @abstractmethod
-    def predict_frame(self, frame: np.ndarray) -> dict[str, list[OCRResult]]: ...
+    def predict_frame(self, frame: Frame) -> dict[str, list[OCRResult]]: ...
+
+    def __repr__(self) -> str:
+        res = f"{self.__class__.__name__}({self.ocr.__class__.__name__})(\n"
+        res += f"\t'engine': {self.engine}, \n"
+        res += f"\t'confidence_threshold': {self.conf_threshold}\n"
+        res += ")"
+
+        return res
+
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")
 
 
 class PaddleOCR(OCR, Loggable):
@@ -126,7 +138,7 @@ class PaddleOCR(OCR, Loggable):
     def _load_model(self) -> paddleocr.PaddleOCR:
         return paddleocr.PaddleOCR(lang="en")
 
-    def predict_frame(self, frame: np.ndarray) -> dict[str, list[OCRResult]]:
+    def predict_frame(self, frame: Frame) -> dict[str, list[OCRResult]]:
         res: defaultdict[str, list[OCRResult]] = defaultdict(list)
 
         ocr_results = self.model.predict(frame)[0]
@@ -143,7 +155,7 @@ class PaddleOCR(OCR, Loggable):
         return dict(res)
 
     def run_ocr(
-        self, frames: list[np.ndarray], return_all: bool = False
+        self, frames: list[Frame], return_all: bool = False
     ) -> dict[str, float]:
         all_results: defaultdict[str, list[float]] = defaultdict(list)
         for frame in frames:
@@ -163,7 +175,7 @@ class EasyOCR(OCR, Loggable):
         self.model = easyocr.Reader(["en"])
         self.allowed_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- "
 
-    def predict_frame(self, frame: np.ndarray) -> dict[str, list[OCRResult]]:
+    def predict_frame(self, frame: Frame) -> dict[str, list[OCRResult]]:
         res: defaultdict[str, list[OCRResult]] = defaultdict(list)
         ocr_results = self.model.readtext(np.array(frame))
 
@@ -174,7 +186,7 @@ class EasyOCR(OCR, Loggable):
         return dict(res)
 
     def run_ocr(
-        self, frames: list[np.ndarray], return_all: bool = False
+        self, frames: list[Frame], return_all: bool = False
     ) -> dict[str, float]:
         all_results: defaultdict[str, list[float]] = defaultdict(list)
         for frame in frames:
