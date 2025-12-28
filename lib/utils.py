@@ -1,11 +1,23 @@
 import logging
 from functools import wraps
-from typing import Callable, TypeAlias, TypedDict
+from typing import (
+    Any,
+    Callable,
+    Concatenate,
+    Generic,
+    ParamSpec,
+    TypeAlias,
+    TypedDict,
+    TypeVar,
+)
 
 from lib.frame import Frame
 
-PreprocessorFn: TypeAlias = Callable[[Frame], Frame]
 Point: TypeAlias = tuple[int, int]
+
+P = ParamSpec("P")
+PreprocessorFn: TypeAlias = Callable[Concatenate[Frame, P], Frame]
+PreprocessorFnTypeVar = TypeVar("PreprocessorFnTypeVar", bound=PreprocessorFn)
 
 
 class OCRResult(TypedDict):
@@ -23,6 +35,31 @@ BASE_COLORS = [
     (128, 0, 128),  # purple
     (0, 128, 0),  # dark green
 ]
+
+
+class PreprocessorFnWrapper(Generic[PreprocessorFnTypeVar]):
+    func: PreprocessorFnTypeVar
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+    def __init__(self, func: PreprocessorFnTypeVar, *args, **kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+
+    def __call__(self, frame: Frame) -> Any:
+        return self.func(frame, *self.args, **self.kwargs)
+
+    def __repr__(self) -> str:
+        res = f"{self.__class__.__name__}(\n"
+        res += f"\t'func': {self.func.__name__}, \n"
+        res += f"\t'args': {self.args}, \n"
+        res += f"\t'kwargs': {self.kwargs}\n"
+        res += ")"
+        return res
+
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")
 
 
 def suppress_logging(func):

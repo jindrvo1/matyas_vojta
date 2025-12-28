@@ -1,206 +1,125 @@
-import cv2
-import numpy as np
-import easyocr
+import inspect
+from dataclasses import dataclass
+from typing import Any, Self, overload
 
+import lib.preprocessing_funcs as funcs
 from lib.frame import Frame
-from lib.logger import logger
+from lib.utils import PreprocessorFn, PreprocessorFnWrapper
 
 
-def preprocess_test(frame: Frame) -> Frame:
-    # ...existing code...
-    return frame
+@dataclass
+class Preprocessor:
+    steps: list[PreprocessorFnWrapper[PreprocessorFn]]
+    Color: funcs.Color = funcs.Color()
+    Contrast: funcs.Contrast = funcs.Contrast()
+    Enhancement: funcs.Enhancement = funcs.Enhancement()
 
-def enhance_contrast(
-    frame: np.ndarray,
-    method: str = "clahe",
-    clahe_clip: float = 3.0,
-    clahe_tile: tuple[int, int] = (8, 8),
-    gamma: float = 1.2,
-) -> np.ndarray:
-    """Robust contrast enhancement. Input can be gray or BGR; returns BGR uint8."""
-    if frame is None:
-        return frame
+    def __init__(
+        self,
+        steps: list[tuple[PreprocessorFn, *tuple[Any, ...]]] | None = None,
+    ):
+        self.steps = []
+        self.add_steps(steps or [])
+        self.apply = self.__call__
 
-    # Ensure numpy array and not empty
-    frame = np.asarray(frame)
-    if frame.size == 0:
-        return frame
+    def add_step(self, step: PreprocessorFn, *args, **kwargs) -> Self:
+        self.steps.append(PreprocessorFnWrapper(step, *args, **kwargs))
+        return self
 
-    # Ensure uint8
-    if frame.dtype != np.uint8:
-        frame = np.clip(frame, 0, 255).astype(np.uint8)
+    def add_steps(
+        self,
+        steps: list[tuple[PreprocessorFn, *tuple[Any, ...]]],
+    ) -> Self:
+        for step, *step_args in steps:
+            arg_names: list[str] = [
+                arg_name
+                for arg_name in list(inspect.signature(step).parameters.keys())[1:]
+            ]
+            args = [arg for arg in step_args if not isinstance(arg, dict)]
+            kwargs = {
+                arg_name: arg_val
+                for step_arg in step_args
+                if isinstance(step_arg, dict)
+                for arg_name, arg_val in step_arg.items()
+            }
+            bound_kwargs = {}
+            for arg_name in arg_names:
+                arg_val = kwargs.get(arg_name)
+                if arg_val is None and len(args) > 0:
+                    arg_val = args.pop(0)
+                if arg_val is not None:
+                    bound_kwargs[arg_name] = arg_val
 
-    # If grayscale, convert to BGR for color conversions
-    if frame.ndim == 2:
-        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-    elif frame.ndim == 3 and frame.shape[2] == 1:
-        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            self.add_step(step, **bound_kwargs)
 
-    try:
-        if method == "clahe":
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=clahe_tile)
-            l2 = clahe.apply(l)
-            lab2 = cv2.merge((l2, a, b))
-            out = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
-            return out
-        if method == "gamma":
-            inv = 1.0 / max(gamma, 1e-6)
-            table = ((np.linspace(0, 255, 256) / 255.0) ** inv * 255.0).astype("uint8")
-            return cv2.LUT(frame, table)
-        if method == "hist":
-            ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-            y, cr, cb = cv2.split(ycrcb)
-            y_eq = cv2.equalizeHist(y)
-            ycrcb2 = cv2.merge((y_eq, cr, cb))
-            return cv2.cvtColor(ycrcb2, cv2.COLOR_YCrCb2BGR)
-    except Exception as e:
-        logger.debug(f"enhance_contrast failed: {e}")
-    return frame
+        return self
 
+    @overload
+    def __call__(self, frames: Frame) -> Frame: ...
+    @overload
+    def __call__(self, frames: list[Frame]) -> list[Frame]: ...
+    def __call__(self, frames: Frame | list[Frame]) -> Frame | list[Frame]:
+        if isinstance(frames, list):
+            return [self(frame) for frame in frames]
+        elif isinstance(frames, Frame):
+            res = frames.copy()
+            for step in self.steps:
+                res = step(res)
+            return res
 
-def run_ocr(
-    ocr_reader: easyocr.Reader,
-    frames: list[np.ndarray],
-    enhance: bool = True,
-    method: str = "clahe",
-) -> dict[str, list[float]]:
-    """
-    Apply enhancement robustly per-cropped-frame (handles grayscale/empty),
-    convert to RGB and run easyocr.
-    """
-    detected_registrations = {}
-    if not frames:
-        return detected_registrations
+        raise TypeError(f"Expected Frame or list[Frame], got {type(frames)}")
 
-    for i, frame in enumerate(frames):
-        try:
-            if frame is None or np.asarray(frame).size == 0:
-                continue
+    def __repr__(self) -> str:
+        res = f"{self.__class__.__name__}(\n"
+        for i, step in enumerate(self.steps):
+            args = ",".join(map(str, step.args))
+            kwargs = ",".join(f"{k}={v}" for k, v in step.kwargs.items())
+            res += f"\t{step.func.__name__}("
+            res += f"{args}{',' if args and kwargs else ''}{f'{kwargs}' if kwargs else ''})"
+            res += f"{', ' if i < len(self.steps) - 1 else ''}\n"
+        res += ")"
 
-            proc = frame.copy()
-            if enhance:
-                proc = enhance_contrast(proc, method=method)
+        return res
 
-            # easyocr expects RGB
-            if proc.ndim == 3 and proc.shape[2] == 3:
-                proc_rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
-            else:
-                # if still single channel, convert to 3-channel RGB-like
-                proc_rgb = proc
-
-            ocr_results = ocr_reader.readtext(
-                proc_rgb, allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- "
-            )
-            for _, text, text_conf in ocr_results:
-                cleaned = text.strip().upper()
-                text_conf = float(text_conf)
-                detected_registrations.setdefault(cleaned, []).append(text_conf)
-        except Exception as e:
-            logger.debug(f"run_ocr: error on frame {i}: {e}")
-            continue
-
-    return detected_registrations
-# ...existing code...
-    return frame
+    def __str__(self) -> str:
+        return self.__repr__().replace("\n", "").replace("\t", "")
 
 
-def run_ocr(
-    ocr_reader: easyocr.Reader,
-    frames: list[np.ndarray],
-    enhance: bool = True,
-    method: str = "clahe",
-) -> dict[str, list[float]]:
-    """
-    Apply enhancement robustly per-cropped-frame (handles grayscale/empty),
-    convert to RGB and run easyocr.
-    """
-    detected_registrations = {}
-    if not frames:
-        return detected_registrations
+class PreprocessorFactory:
+    Color: funcs.Color = funcs.Color()
+    Contrast: funcs.Contrast = funcs.Contrast()
+    Enhancement: funcs.Enhancement = funcs.Enhancement()
 
-    for i, frame in enumerate(frames):
-        try:
-            if frame is None or np.asarray(frame).size == 0:
-                continue
+    defaults: dict[str, list[tuple[PreprocessorFn, *tuple[Any, ...]]]] = {
+        "paddle": [
+            (Enhancement.denoise_colored,),
+            (Contrast.clahe_bgr, 3.0, 8),
+            (Enhancement.sharpen,),
+        ],
+        "easyocr": [
+            (Enhancement.denoise_colored,),
+            (Color.convert, Color.BGR, Color.GRAY),
+            (Contrast.clahe_gray, 3.0, 8),
+            (Enhancement.sharpen,),
+            (Color.convert, Color.GRAY, Color.BGR),
+        ],
+    }
 
-            proc = frame.copy()
-            if enhance:
-                proc = enhance_contrast(proc, method=method)
+    @classmethod
+    def for_paddle(cls) -> Preprocessor:
+        return cls._construct("paddle")
 
-            # easyocr expects RGB
-            if proc.ndim == 3 and proc.shape[2] == 3:
-                proc_rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
-            else:
-                # if still single channel, convert to 3-channel RGB-like
-                proc_rgb = proc
+    @classmethod
+    def for_easyocr(cls) -> Preprocessor:
+        return cls._construct("easyocr")
 
-            ocr_results = ocr_reader.readtext(
-                proc_rgb, allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- "
-            )
-            for _, text, text_conf in ocr_results:
-                cleaned = text.strip().upper()
-                text_conf = float(text_conf)
-                detected_registrations.setdefault(cleaned, []).append(text_conf)
-        except Exception as e:
-            logger.debug(f"run_ocr: error on frame {i}: {e}")
-            continue
-
-    return detected_registrations
-# ...existing code...
-    return frame
-
-
+    @classmethod
+    def _construct(cls, key: str) -> Preprocessor:
+        preprocessor = Preprocessor()
+        for step in cls.defaults[key]:
+            preprocessor.add_step(*step)
+        return preprocessor
 
 
 def preprocess_identity(frame: Frame) -> Frame:
     return frame
-
-
-def preprocess_easyocr(
-    frame: Frame,
-) -> Frame:
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # CLAHE for local contrast enhancement
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # Sharpen the image
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    sharpened = cv2.filter2D(enhanced, -1, kernel)
-
-    # Denoise (optional)
-    denoised = cv2.fastNlMeansDenoising(sharpened, h=10)
-
-    # Adaptive thresholding to isolate text
-    # thresh = cv2.adaptiveThreshold(
-    #     denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
-    # )
-
-    # Convert back to 3-channel for saving video
-    processed = cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
-    return Frame(processed)
-
-
-def preprocess_paddleocr(frame: Frame) -> Frame:
-    # 1️⃣ Denoise (removes compression noise / grass texture)
-    # frame = cv2.fastNlMeansDenoisingColored(frame, None, 10, 10, 7, 21)
-
-    # 2️⃣ Convert to LAB color space for adaptive contrast
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    el, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    cl = clahe.apply(el)
-    merged = cv2.merge((cl, a, b))
-    frame_cp = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-
-    # 3️⃣ Slight sharpening
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    frame_cp = cv2.filter2D(frame_cp, -1, kernel)
-
-    # 5️⃣ Convert to RGB (required by PaddleOCR)
-    frame_cp = cv2.cvtColor(frame_cp, cv2.COLOR_BGR2RGB)
-
-    return Frame(frame_cp)

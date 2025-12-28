@@ -13,8 +13,9 @@ from lib.frame import Frame
 from lib.logger import Loggable
 from lib.object_detection import PlaneDetector
 from lib.ocr import OCR
-from lib.preprocessing import preprocess_identity
-from lib.utils import BASE_COLORS, OCRResult, Point, PreprocessorFn
+from lib.postprocessing import Postprocessor
+from lib.preprocessing import Preprocessor
+from lib.utils import BASE_COLORS, OCRResult, Point
 
 
 class VideoSource(Loggable):
@@ -24,9 +25,9 @@ class VideoSource(Loggable):
     def preprocess_frame(
         self,
         frame: Frame,
-        processing_func: PreprocessorFn,
+        preprocessor: Preprocessor,
     ) -> Frame:
-        return processing_func(frame)
+        return preprocessor(frame)
 
     @abstractmethod
     def play(self, delay_ms: int = 100, inline: bool = True, *args, **kwargs): ...
@@ -172,7 +173,8 @@ class CameraSource(VideoSource, Loggable):
         plane_detector: PlaneDetector,
         ocr: OCR,
         target_fps: int,
-        preprocessing_func: PreprocessorFn = preprocess_identity,
+        preprocessor: Preprocessor = Preprocessor(),
+        postprocessor: Postprocessor | None = None,
         start_end_frame: Sequence[int | None] = (None, None),
         start_end_time: Sequence[int | None] = (None, None),
         pause_on_detection: bool = True,
@@ -197,9 +199,23 @@ class CameraSource(VideoSource, Loggable):
 
             frames_data = []
             for cropped_frame in cropped_frames:
-                preprocessed = preprocessing_func(cropped_frame)
+                preprocessed = preprocessor(cropped_frame)
                 ocr_results = ocr.predict_frame(preprocessed)
-                frames_data.append((cropped_frame, preprocessed, ocr_results))
+                ((res_text, _),) = ocr_results.items()
+                res_text_postprocessed = (
+                    postprocessor.process_registration(res_text)
+                    if postprocessor
+                    else res_text
+                )
+                frames_data.append(
+                    (
+                        frame,
+                        cropped_frame,
+                        preprocessed,
+                        ocr_results,
+                        res_text_postprocessed,
+                    )
+                )
 
             self._show_frames_of_interest_boxes(frames_data, idx)
             if pause_on_detection:
@@ -223,7 +239,7 @@ class CameraSource(VideoSource, Loggable):
 
     def _show_frames_of_interest_boxes(
         self,
-        frames_data: list[tuple[Frame, Frame, dict[str, list[OCRResult]]]],
+        frames_data: list[tuple[Frame, Frame, Frame, dict[str, list[OCRResult]], str]],
         idx: int,
     ):
         if not frames_data:
@@ -232,7 +248,7 @@ class CameraSource(VideoSource, Loggable):
         clear_output(wait=True)
 
         all_texts: list[str] = []
-        for _, _, ocr_results in frames_data:
+        for _, _, _, ocr_results, _ in frames_data:
             for text in ocr_results.keys():
                 if text not in all_texts:
                     all_texts.append(text)
@@ -246,52 +262,89 @@ class CameraSource(VideoSource, Loggable):
 
         n_planes = len(frames_data)
         ncols = 2
-        nrows = n_planes
+        nrows = n_planes * 2
 
-        # Height grows with number of planes
-        fig_height = 4 * nrows  # tweakable
+        fig_height = 4 * n_planes * 2
         fig, axes = plt.subplots(nrows, ncols, figsize=(16, fig_height))
 
-        # If there's only one plane, axes is a 1D array, normalize it to 2D
-        if nrows == 1:
-            axes = np.array([axes])  # shape (1, 2)
+        if nrows == 2:
+            axes = np.array(axes).reshape(2, 2)
 
-        for plane_idx, (cropped, preprocessed, ocr_results) in enumerate(frames_data):
+        for plane_idx, (
+            original,
+            cropped,
+            preprocessed,
+            ocr_results,
+            postprocessed,
+        ) in enumerate(frames_data):
+            row_top = plane_idx * 2
+            row_bottom = row_top + 1
+
+            orig_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
             cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
-            pre_rgb = cv2.cvtColor(preprocessed.copy(), cv2.COLOR_BGR2RGB)
+            pre_rgb = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2RGB)
+            pre_boxes = pre_rgb.copy()
+            pre_boxes_postprocessed = pre_rgb.copy()
 
-            ax_cropped = axes[plane_idx, 0]
-            ax_pre = axes[plane_idx, 1]
+            # ── Top row ─────────────────────────────
+            axes[row_top, 0].imshow(orig_rgb)
+            axes[row_top, 0].set_title(
+                f"Frame {idx + 1} – plane #{plane_idx + 1} (original)"
+            )
+            axes[row_top, 0].axis("off")
 
-            # Show cropped
-            ax_cropped.imshow(cropped_rgb)
-            ax_cropped.set_title(f"Frame {idx + 1} – plane #{plane_idx + 1} (cropped)")
-            ax_cropped.axis("off")
+            axes[row_top, 1].imshow(cropped_rgb)
+            axes[row_top, 1].set_title(
+                f"Frame {idx + 1} – plane #{plane_idx + 1} (cropped)"
+            )
+            axes[row_top, 1].axis("off")
 
-            # Draw OCR boxes on preprocessed
+            # ── Bottom row ──────────────────────────
+            axes[row_bottom, 0].imshow(pre_rgb)
+            axes[row_bottom, 0].set_title(
+                f"Frame {idx + 1} – plane #{plane_idx + 1} (preprocessed)"
+            )
+            axes[row_bottom, 0].axis("off")
+
+            # Draw OCR boxes
             for text, results in ocr_results.items():
                 color_rgb_cv2 = tuple(label_to_color[text][0:3])
-                color_rgb_matplotlib = tuple(c / 255 for c in color_rgb_cv2)
 
                 for r in results:
-                    conf, pts = r["conf"], r["points"]
-
-                    # Collect summary lines with plane index, to make it clear
-                    summary_lines.append(
-                        f"Plane #{plane_idx + 1} – {text}: {float(conf):.3f}"
-                    )
-                    summary_colors.append(color_rgb_matplotlib)
+                    _, pts = r["conf"], r["points"]
 
                     if len(pts) == 2:
-                        self._draw_boxes_paddle(pre_rgb, pts, text, color_rgb_cv2)
+                        self._draw_boxes_paddle(pre_boxes, pts, text, color_rgb_cv2)
                     elif len(pts) == 4:
-                        self._draw_boxes_easyocr(pre_rgb, pts, text, color_rgb_cv2)
+                        self._draw_boxes_easyocr(pre_boxes, pts, text, color_rgb_cv2)
 
-            ax_pre.imshow(pre_rgb)
-            ax_pre.set_title(
-                f"Frame {idx + 1} – plane #{plane_idx + 1} (preprocessed + OCR boxes)"
+            axes[row_bottom, 0].imshow(pre_boxes)
+            axes[row_bottom, 0].set_title(
+                f"Frame {idx + 1} – plane #{plane_idx + 1} (OCR boxes)"
             )
-            ax_pre.axis("off")
+            axes[row_bottom, 0].axis("off")
+
+            # Draw OCR boxes
+            for text, results in ocr_results.items():
+                color_rgb_cv2 = tuple(label_to_color[text][0:3])
+
+                for r in results:
+                    _, pts = r["conf"], r["points"]
+
+                    if len(pts) == 2:
+                        self._draw_boxes_paddle(
+                            pre_boxes_postprocessed, pts, postprocessed, color_rgb_cv2
+                        )
+                    elif len(pts) == 4:
+                        self._draw_boxes_easyocr(
+                            pre_boxes_postprocessed, pts, postprocessed, color_rgb_cv2
+                        )
+
+            axes[row_bottom, 1].imshow(pre_boxes_postprocessed)
+            axes[row_bottom, 1].set_title(
+                f"Frame {idx + 1} – plane #{plane_idx + 1} (postprocessed)"
+            )
+            axes[row_bottom, 1].axis("off")
 
         # Dynamic space at bottom for the summary text
         extra_bottom = min(0.02 * max(len(summary_lines), 1), 0.18)
@@ -312,9 +365,11 @@ class CameraSource(VideoSource, Loggable):
 
         # Console logging
         print(f"Frame {idx + 1}: {n_planes} plane(s) detected.")
-        if any(fd[2] for fd in frames_data):
+        if any(fd[3] for fd in frames_data):
             print("OCR results:")
-            for plane_idx, (_cropped, _pre, ocr_results) in enumerate(frames_data):
+            for plane_idx, (_, _, _, ocr_results, postprocessed) in enumerate(
+                frames_data
+            ):
                 if not ocr_results:
                     print(f"\tPlane #{plane_idx + 1}: <no OCR results>")
                     continue
@@ -322,7 +377,7 @@ class CameraSource(VideoSource, Loggable):
                 print(f"\tPlane #{plane_idx + 1}:")
                 for text, results in ocr_results.items():
                     for r in results:
-                        print(f"\t\t{text}: {float(r['conf']):.3f}")
+                        print(f"\t\t{text} -> {postprocessed}: {float(r['conf']):.3f}")
         else:
             print("OCR results: <none>")
 
@@ -427,7 +482,7 @@ class VideoFileSource(VideoSource, Loggable):
     def preprocess(
         self,
         frames: list[Frame] | str,
-        processing_func: PreprocessorFn,
+        preprocessor: Preprocessor,
         save_key: str,
     ) -> Self:
         if isinstance(frames, str):
@@ -435,7 +490,7 @@ class VideoFileSource(VideoSource, Loggable):
 
         processed_frames = []
         for frame in frames:
-            processed_frame = self.preprocess_frame(frame, processing_func)
+            processed_frame = self.preprocess_frame(frame, preprocessor)
             processed_frames.append(processed_frame)
 
         self.add_frames(processed_frames, save_key)

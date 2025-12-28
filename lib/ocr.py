@@ -136,7 +136,12 @@ class PaddleOCR(OCR, Loggable):
 
     @suppress_logging
     def _load_model(self) -> paddleocr.PaddleOCR:
-        return paddleocr.PaddleOCR(lang="en")
+        return paddleocr.PaddleOCR(
+            lang="en",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
 
     def predict_frame(self, frame: Frame) -> dict[str, list[OCRResult]]:
         res: defaultdict[str, list[OCRResult]] = defaultdict(list)

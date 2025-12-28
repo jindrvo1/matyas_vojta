@@ -33,13 +33,25 @@ class Dataset(Loggable):
     def add_results(
         self,
         row_idx: tuple[int, int],
-        ocr_result: dict[str, float],
+        ocr_text: str,
+        ocr_postprocessed: str | None = None,
         registration_col: str = "Predicted registration",
-        confidence_col: str = "Prediction confidence",
+        postprocessed_col: str = "Predicted registration (postprocessed)",
     ):
-        ((res_text, res_conf),) = ocr_result.items()
-        self.df.loc[row_idx, registration_col] = res_text
-        self.df.loc[row_idx, confidence_col] = res_conf
+        self.df.loc[row_idx, registration_col] = ocr_text
+        self.df.loc[row_idx, postprocessed_col] = ocr_postprocessed
+
+    def show_results(
+        self,
+        true_col: str = "Registration",
+        pred_col: str = "Predicted registration (postprocessed)",
+        additional_cols: list[str] = ["Predicted registration"],
+    ) -> pd.DataFrame:
+        cols = [true_col, pred_col, *additional_cols]
+        return self.df[cols]
+
+    def save_to_csv(self, path_to_csv: str):
+        self.df.to_csv(path_to_csv, index=False)
 
     def _drop_duplicates(
         self, df: pd.DataFrame, subset: list[str] = ["Video file"]

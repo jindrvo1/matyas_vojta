@@ -23,5 +23,11 @@ class Frame(np.ndarray):
         if obj is None:
             return
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Frame):
+            return False
+
+        return bool(np.equal(self, other).all())
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(np.ndarray.shape={self.shape})"
